@@ -17,6 +17,12 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Trust proxy configuration for proper IP handling
+app.set(
+  "trust proxy",
+  process.env.TRUST_PROXY === "true" || process.env.NODE_ENV === "production"
+);
+
 // Security middleware
 app.use(
   helmet({
@@ -35,11 +41,48 @@ app.use(
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // limit each IP to 1000 requests per windowMs
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // limit each IP to 1000 requests per windowMs
   message: "Too many requests from this IP, please try again later.",
   standardHeaders: true,
   legacyHeaders: false,
+  // Trust proxy to handle X-Forwarded-For headers properly
+  trustProxy: true,
+  // Custom key generator to handle malformed X-Forwarded-For headers
+  keyGenerator: (req) => {
+    try {
+      // Get the real IP address, handling various proxy scenarios
+      const forwarded = req.headers["x-forwarded-for"];
+      if (forwarded) {
+        // Handle IPv6-mapped IPv4 addresses and multiple IPs
+        const ips = forwarded.split(",").map((ip) => ip.trim());
+        const firstIp = ips[0];
+
+        // Handle IPv6-mapped IPv4 addresses (::ffff:xxx.xxx.xxx.xxx)
+        if (firstIp.startsWith("::ffff:")) {
+          return firstIp.substring(7); // Remove ::ffff: prefix
+        }
+
+        // Validate IP format
+        if (firstIp && (firstIp.includes(".") || firstIp.includes(":"))) {
+          return firstIp;
+        }
+      }
+
+      // Fallback to Express's IP detection
+      return (
+        req.ip ||
+        req.connection.remoteAddress ||
+        req.socket.remoteAddress ||
+        "unknown"
+      );
+    } catch (error) {
+      logger.error("Error generating rate limit key:", error);
+      return "unknown";
+    }
+  },
+  // Skip rate limiting for health checks
+  skip: (req) => req.path === "/health",
 });
 app.use(limiter);
 
